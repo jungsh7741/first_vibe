@@ -1,0 +1,154 @@
+import asyncio
+import os
+import sqlite3
+from contextlib import asynccontextmanager
+from datetime import date
+from pathlib import Path
+from typing import Any
+
+import httpx
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+
+load_dotenv()
+API_URL = "https://api.data.go.kr/openapi/tn_pubr_public_cltur_fstvl_api"
+DB_PATH = Path(__file__).resolve().parents[1] / "festivals.db"
+PAGE_SIZE = 1000
+
+
+def connect_db() -> sqlite3.Connection:
+    db = sqlite3.connect(DB_PATH)
+    db.row_factory = sqlite3.Row
+    return db
+
+
+def init_db() -> None:
+    with connect_db() as db:
+        db.execute("""CREATE TABLE IF NOT EXISTS festivals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL, place TEXT, start_date TEXT, end_date TEXT,
+            description TEXT, organizer TEXT, host TEXT, sponsor TEXT,
+            phone TEXT, homepage TEXT, road_address TEXT, lot_address TEXT,
+            latitude TEXT, longitude TEXT, reference_date TEXT,
+            provider_code TEXT, provider_name TEXT,
+            UNIQUE(name, place, start_date, end_date, provider_code)
+        )""")
+
+
+def find_items(payload: Any) -> tuple[list[dict], int | None]:
+    """Handle the data.go.kr response envelope and minor JSON shape variations."""
+    if not isinstance(payload, dict):
+        raise ValueError("API 응답이 JSON 객체가 아닙니다.")
+    response = payload.get("response", payload)
+    header = response.get("header", {}) if isinstance(response, dict) else {}
+    code = str(header.get("resultCode", ""))
+    if code and code not in {"00", "0", "SUCCESS"}:
+        raise ValueError(header.get("resultMsg", f"공공데이터 API 오류 ({code})"))
+    body = response.get("body", {}) if isinstance(response, dict) else {}
+    total = body.get("totalCount")
+    total = int(total) if total not in (None, "") else None
+    raw = body.get("items", [])
+    if isinstance(raw, dict):
+        raw = raw.get("item", [])
+    if isinstance(raw, dict):
+        raw = [raw]
+    return ([item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []), total
+
+
+async def fetch_all() -> list[dict]:
+    key = os.getenv("DATA_GO_KR_SERVICE_KEY", "").strip()
+    if not key:
+        raise RuntimeError("DATA_GO_KR_SERVICE_KEY가 설정되지 않았습니다. backend/.env를 확인하세요.")
+    rows: list[dict] = []
+    page = 1
+    async with httpx.AsyncClient(timeout=45) as client:
+        while True:
+            response = await client.get(API_URL, params={
+                "serviceKey": key, "pageNo": page, "numOfRows": PAGE_SIZE, "type": "json"
+            })
+            response.raise_for_status()
+            try:
+                batch, total = find_items(response.json())
+            except (ValueError, TypeError) as exc:
+                raise RuntimeError(f"공공데이터 API 응답을 읽지 못했습니다: {exc}") from exc
+            rows.extend(batch)
+            if not batch or (total is not None and len(rows) >= total) or len(batch) < PAGE_SIZE:
+                break
+            page += 1
+    return rows
+
+
+def save_all(rows: list[dict]) -> int:
+    fields = {
+        "name": "fstvlNm", "place": "opar", "start_date": "fstvlStartDate",
+        "end_date": "fstvlEndDate", "description": "fstvlCo", "organizer": "mnnstNm",
+        "host": "auspcInsttNm", "sponsor": "suprtInsttNm", "phone": "phoneNumber",
+        "homepage": "homepageUrl", "road_address": "rdnmadr", "lot_address": "lnmadr",
+        "latitude": "latitude", "longitude": "longitude", "reference_date": "referenceDate",
+        "provider_code": "instt_code", "provider_name": "instt_nm",
+    }
+    columns = list(fields)
+    values = [[str(row.get(src, "") or "").strip() or None for src in fields.values()] for row in rows]
+    with connect_db() as db:
+        db.execute("DELETE FROM festivals")
+        if values:
+            db.executemany(
+                f"INSERT OR IGNORE INTO festivals ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+                values,
+            )
+    return len(values)
+
+
+async def sync_data() -> int:
+    rows = await fetch_all()
+    # The existing snapshot stays intact if fetching fails; replace only after full fetch.
+    return save_all(rows)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    init_db()
+    if os.getenv("SYNC_ON_STARTUP", "true").lower() in {"1", "true", "yes"} and os.getenv("DATA_GO_KR_SERVICE_KEY", "").strip():
+        try:
+            await sync_data()
+        except Exception as exc:
+            print(f"축제 데이터 자동 동기화 실패: {exc}")
+    yield
+
+
+app = FastAPI(title="전국 축제 정보 API", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/api/festivals")
+def list_festivals(page: int = Query(1, ge=1), size: int = Query(10, ge=1, le=100)):
+    with connect_db() as db:
+        total = db.execute("SELECT COUNT(*) FROM festivals").fetchone()[0]
+        records = db.execute(
+            "SELECT * FROM festivals ORDER BY start_date IS NULL, start_date, name LIMIT ? OFFSET ?",
+            (size, (page - 1) * size),
+        ).fetchall()
+    today = date.today().isoformat()
+    items = []
+    for row in records:
+        item = dict(row)
+        start, end = item["start_date"], item["end_date"]
+        item["status"] = "진행중" if start and end and start <= today <= end else "완료" if end and end < today else "예정"
+        items.append(item)
+    return {"items": items, "total": total, "page": page, "size": size, "total_pages": (total + size - 1) // size}
+
+
+@app.post("/api/sync")
+async def sync_festivals():
+    try:
+        count = await sync_data()
+        return {"message": "전체 축제 데이터를 동기화했습니다.", "count": count}
+    except (RuntimeError, httpx.HTTPError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
