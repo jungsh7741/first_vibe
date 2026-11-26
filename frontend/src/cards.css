@@ -1,0 +1,26 @@
+.festival-card {
+  isolation: isolate;
+  overflow: hidden;
+  background: #f1f2ed;
+  font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;
+}
+
+.festival-card::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  background-image: linear-gradient(rgba(247, 247, 242, 0.78), rgba(247, 247, 242, 0.78)), var(--card-image, none);
+  background-size: cover;
+  background-position: center;
+  transition: background-image 180ms ease;
+}
+
+.festival-card,
+.festival-card * {
+  font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;
+}
+
+.festival-card h3 {
+  font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;
+}

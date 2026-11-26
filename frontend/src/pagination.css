@@ -1,0 +1,85 @@
+.pagination {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  position: relative;
+}
+
+.page-summary {
+  justify-self: start;
+}
+
+.page-navigation {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.page-numbers {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.page-navigation button {
+  display: grid;
+  place-items: center;
+  height: 34px;
+  color: #55574e;
+  background: transparent;
+  border: 1px solid #d1d2c7;
+  cursor: pointer;
+}
+
+.page-navigation button:disabled {
+  color: #c9cac0;
+  cursor: default;
+}
+
+.page-navigation .page-jump {
+  width: 34px;
+}
+
+.page-navigation .page-number {
+  width: 27px;
+  border-color: transparent;
+  font: 10px 'DM Mono', monospace;
+}
+
+.page-navigation .page-number.selected {
+  color: #485b29;
+  background: #e8ecd9;
+}
+
+.page-navigation .page-number:disabled {
+  opacity: 1;
+}
+
+@media (max-width: 500px) {
+  .pagination {
+    grid-template-columns: 1fr;
+    row-gap: 14px;
+  }
+
+  .page-navigation {
+    position: static;
+    grid-row: 2;
+    justify-self: center;
+    transform: none;
+  }
+
+  .page-navigation {
+    gap: 5px;
+  }
+
+  .page-numbers {
+    gap: 0;
+  }
+
+  .page-navigation .page-number {
+    width: 23px;
+    font-size: 9px;
+  }
+}

@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react'
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUpRight, CalendarDays, MapPin, Search, Sparkles } from 'lucide-react'
 
 const PAGE_SIZE = 10
-const colors = ['#d8ed86', '#ffd3bf', '#d3e9e9', '#f7de91', '#d7d0fa', '#f2c5d3']
 const dateText = (value) => value ? value.replaceAll('-', '.') : '일정 미정'
 
 function App() {
@@ -11,6 +10,11 @@ function App() {
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [bannerImages, setBannerImages] = useState({})
+  const totalPages = Math.max(data.total_pages, 1)
+  const pageGroupStart = Math.floor((page - 1) / 10) * 10 + 1
+  const pageGroupEnd = Math.min(pageGroupStart + 9, totalPages)
+  const visiblePages = Array.from({ length: pageGroupEnd - pageGroupStart + 1 }, (_, index) => pageGroupStart + index)
 
   useEffect(() => {
     let active = true
@@ -23,6 +27,21 @@ function App() {
     return () => { active = false }
   }, [page])
 
+  useEffect(() => {
+    let active = true
+    data.items.filter((item) => item.homepage).forEach((item) => {
+      fetch(`/api/festivals/${item.id}/banner-image`)
+        .then((response) => response.ok ? response.json() : null)
+        .then((result) => {
+          if (active && result?.image_url) {
+            setBannerImages((current) => ({ ...current, [item.id]: result.image_url }))
+          }
+        })
+        .catch(() => {})
+    })
+    return () => { active = false }
+  }, [data.items])
+
   const filtered = data.items.filter((item) => `${item.name || ''} ${item.place || ''} ${item.road_address || ''}`.toLowerCase().includes(query.toLowerCase()))
 
   return <main className="shell">
@@ -34,8 +53,17 @@ function App() {
 
     <section className="listing" id="festivals"><div className="section-head"><div><span className="section-kicker">THE FESTIVAL INDEX · 2026</span><h2>축제 아카이브<span className="count">{data.total.toLocaleString()}</span></h2></div><label className="search"><Search size={17}/><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="축제명, 장소 검색"/><kbd>↵</kbd></label></div>
       <div className="list-meta"><span>전국에서 발견한 축제</span><span>01 — {String(Math.min(page * PAGE_SIZE, data.total)).padStart(2, '0')} <i>/</i> {String(data.total).padStart(2, '0')}</span></div>
-      <div className="festival-grid">{loading ? <div className="state">축제 정보를 불러오고 있어요…</div> : error ? <div className="state error">{error}<small>API 키를 설정한 뒤 동기화하면 축제 목록이 표시됩니다.</small></div> : filtered.length === 0 ? <div className="state">검색 결과가 없습니다.</div> : filtered.map((item, index) => <article className="festival-card" key={item.id} style={{'--card-color': colors[(index + (page - 1) * PAGE_SIZE) % colors.length]}}><div className="card-top"><span className="card-number">NO. {String((page - 1) * PAGE_SIZE + index + 1).padStart(2, '0')}</span><span className={`status ${item.status === '진행중' ? 'live' : ''}`}>{item.status}</span></div><h3>{item.name || '이름 없는 축제'}</h3><div className="card-place"><MapPin size={14}/>{item.place || item.road_address || '장소 정보 없음'}</div><div className="card-bottom"><span><CalendarDays size={14}/>{dateText(item.start_date)} — {dateText(item.end_date)}</span>{item.homepage && <a href={item.homepage} target="_blank" rel="noreferrer" aria-label="축제 홈페이지"><ArrowUpRight size={16}/></a>}</div></article>)}</div>
-      <div className="pagination"><span>PAGE <b>{String(page).padStart(2, '0')}</b> OF {String(Math.max(data.total_pages, 1)).padStart(2, '0')}</span><div><button disabled={page <= 1 || loading} onClick={() => setPage(page - 1)} aria-label="이전 페이지"><ArrowLeft size={17}/></button><button disabled={page >= data.total_pages || loading} onClick={() => setPage(page + 1)} aria-label="다음 페이지"><ArrowRight size={17}/></button></div></div>
+      <div className="festival-grid">{loading ? <div className="state">축제 정보를 불러오고 있어요…</div> : error ? <div className="state error">{error}<small>API 키를 설정한 뒤 동기화하면 축제 목록이 표시됩니다.</small></div> : filtered.length === 0 ? <div className="state">검색 결과가 없습니다.</div> : filtered.map((item, index) => <article className="festival-card" key={item.id} style={{'--card-image': bannerImages[item.id] ? `url(${JSON.stringify(bannerImages[item.id])})` : 'none'}}><div className="card-top"><span className="card-number">NO. {String((page - 1) * PAGE_SIZE + index + 1).padStart(2, '0')}</span><span className={`status ${item.status === '진행중' ? 'live' : ''}`}>{item.status}</span></div><h3>{item.name || '이름 없는 축제'}</h3><div className="card-place"><MapPin size={14}/>{item.place || item.road_address || '장소 정보 없음'}</div><div className="card-bottom"><span><CalendarDays size={14}/>{dateText(item.start_date)} — {dateText(item.end_date)}</span>{item.homepage && <a href={item.homepage} target="_blank" rel="noreferrer" aria-label="축제 홈페이지"><ArrowUpRight size={16}/></a>}</div></article>)}</div>
+      <div className="pagination">
+        <span className="page-summary">PAGE <b>{String(page).padStart(2, '0')}</b> OF {String(totalPages).padStart(2, '0')}</span>
+        <div className="page-navigation">
+          <button className="page-jump" disabled={pageGroupStart <= 1 || loading} onClick={() => setPage(Math.max(1, pageGroupStart - 10))} aria-label="이전 10페이지"><ArrowLeft size={17}/></button>
+          <div className="page-numbers" aria-label="페이지 선택">
+            {visiblePages.map((pageNumber) => <button key={pageNumber} className={`page-number ${pageNumber === page ? 'selected' : ''}`} aria-current={pageNumber === page ? 'page' : undefined} onClick={() => setPage(pageNumber)} disabled={loading}>{pageNumber}</button>)}
+          </div>
+          <button className="page-jump" disabled={pageGroupEnd >= totalPages || loading} onClick={() => setPage(Math.min(totalPages, pageGroupStart + 10))} aria-label="다음 10페이지"><ArrowRight size={17}/></button>
+        </div>
+      </div>
     </section>
     <footer><a className="brand footer-brand" href="#top"><span className="brand-mark">f.</span><span>festival<br/>fieldnotes</span></a><span>전국문화축제표준데이터를 바탕으로 만들었습니다.</span><span>MADE FOR THE WAY OUT <span className="footer-star">✳</span></span></footer>
   </main>

@@ -1,10 +1,13 @@
 import asyncio
+from datetime import datetime, timezone
+from html.parser import HTMLParser
 import os
 import sqlite3
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 from dotenv import load_dotenv
@@ -34,6 +37,58 @@ def init_db() -> None:
             provider_code TEXT, provider_name TEXT,
             UNIQUE(name, place, start_date, end_date, provider_code)
         )""")
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(festivals)")}
+        if "banner_image" not in columns:
+            db.execute("ALTER TABLE festivals ADD COLUMN banner_image TEXT")
+        if "banner_checked_at" not in columns:
+            db.execute("ALTER TABLE festivals ADD COLUMN banner_checked_at TEXT")
+
+
+class _OpenGraphImageParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.image = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() != "meta":
+            return
+        values = {key.lower(): value for key, value in attrs if key and value}
+        key = (values.get("property") or values.get("name") or "").lower()
+        if key in {"og:image", "og:image:url", "og:image:secure_url", "twitter:image", "twitter:image:src"}:
+            self.image = values.get("content")
+
+
+async def find_homepage_image(homepage: str | None) -> str | None:
+    if not homepage:
+        return None
+    homepage = homepage.strip()
+    if not homepage.startswith(("http://", "https://")):
+        homepage = f"https://{homepage}"
+    parsed = urlsplit(homepage)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        return None
+    if parsed.hostname.lower() in {"localhost", "127.0.0.1", "::1"} or parsed.hostname.lower().endswith(".local"):
+        return None
+    try:
+        async with httpx.AsyncClient(
+            timeout=6,
+            follow_redirects=True,
+            headers={"User-Agent": "FestivalFieldnotes/1.0 (+public festival metadata preview)"},
+        ) as client:
+            response = await client.get(homepage)
+            if response.status_code >= 400 or "html" not in response.headers.get("content-type", "").lower():
+                return None
+            parser = _OpenGraphImageParser()
+            parser.feed(response.text[:1_000_000])
+            if not parser.image:
+                return None
+            image_url = urljoin(str(response.url), parser.image.strip())
+            image_parts = urlsplit(image_url)
+            if image_parts.scheme not in {"http", "https"} or not image_parts.hostname:
+                return None
+            return image_url
+    except (httpx.HTTPError, ValueError):
+        return None
 
 
 def find_items(payload: Any) -> tuple[list[dict], int | None]:
@@ -143,6 +198,36 @@ def list_festivals(page: int = Query(1, ge=1), size: int = Query(10, ge=1, le=10
         item["status"] = "진행중" if start and end and start <= today <= end else "완료" if end and end < today else "예정"
         items.append(item)
     return {"items": items, "total": total, "page": page, "size": size, "total_pages": (total + size - 1) // size}
+
+
+@app.get("/api/festivals/{festival_id}/banner-image")
+async def festival_banner_image(festival_id: int):
+    with connect_db() as db:
+        row = db.execute(
+            "SELECT homepage, banner_image, banner_checked_at FROM festivals WHERE id = ?",
+            (festival_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="축제 정보를 찾을 수 없습니다.")
+
+    checked_at = row["banner_checked_at"]
+    refresh_due = True
+    if checked_at:
+        try:
+            checked = datetime.fromisoformat(checked_at)
+            refresh_due = (datetime.now(timezone.utc) - checked).days >= 30
+        except ValueError:
+            pass
+    if not refresh_due:
+        return {"image_url": row["banner_image"]}
+
+    image_url = await find_homepage_image(row["homepage"])
+    with connect_db() as db:
+        db.execute(
+            "UPDATE festivals SET banner_image = ?, banner_checked_at = ? WHERE id = ?",
+            (image_url, datetime.now(timezone.utc).isoformat(), festival_id),
+        )
+    return {"image_url": image_url}
 
 
 @app.post("/api/sync")
